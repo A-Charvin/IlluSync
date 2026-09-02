@@ -83,7 +83,7 @@ class IlluSync(object):
         messages.addMessage("Starting IlluSync validation...")
         arcpy.env.workspace = "memory"
         arcpy.env.overwriteOutput = True
-        
+
         parcel_lyr = parameters[0].valueAsText
         p_arn_fld = parameters[1].valueAsText
         p_addr_fld = parameters[2].valueAsText
@@ -100,7 +100,7 @@ class IlluSync(object):
             text = str(text).lower()
             text = re.sub(r'[\s-]*\bwao\b', '', text)
             text = text.translate(str.maketrans("", "", string.punctuation))
-            
+
             suffix_map = {
                 r'\brd\b': 'road', r'\bst\b': 'street', r'\bave\b': 'avenue',
                 r'\bblvd\b': 'boulevard', r'\bdr\b': 'drive', r'\bcres\b': 'crescent',
@@ -108,139 +108,139 @@ class IlluSync(object):
                 r'\bhwy\b': 'highway', r'\bln\b': 'lane', r'\bcir\b': 'circle',
                 r'\btr\b': 'trail', r'\bpkwy\b': 'parkway',
                 r'\bn\b': 'north', r'\bs\b': 'south', r'\be\b': 'east', r'\bw\b': 'west',
-                r'\bne\b': 'northeast', r'\bnw\b': 'northwest', r'\bse\b': 'southeast', r'\bsw\b': 'southwest'
+                r'\bne\b': 'northeast', r'\bnw\b': 'northwest',
+                r'\bse\b': 'southeast', r'\bsw\b': 'southwest'
             }
+
             for pattern, replacement in suffix_map.items():
                 text = re.sub(pattern, replacement, text)
-                
+
             text = re.sub(r"\s+", " ", text).strip()
             return text
 
         def is_civic_address(text):
             if not text:
                 return False
+
             words = text.split()
             if not words:
                 return False
-            
+
             first_word = words[0]
+
             if not first_word.isdigit():
                 return False
-            
+
             if len(first_word) >= 3:
                 return True
-                
+
             if len(words) > 1:
                 second_word = words[1]
                 rural_indicators = {
-                    'line', 'highway', 'hwy', 'con', 'concession', 
+                    'line', 'highway', 'hwy', 'con', 'concession',
                     'route', 'rte', 'sideroad'
                 }
                 if second_word in rural_indicators:
                     return False
-                    
+
             return True
 
-        messages.addMessage("Performing spatial join (Parcel target)...")
+        def add_field_map(field_mappings, source_layer, source_field, output_name):
+            fm = arcpy.FieldMap()
+            fm.addInputField(source_layer, source_field)
+            out_field = fm.outputField
+            out_field.name = output_name
+            fm.outputField = out_field
+            field_mappings.addFieldMap(fm)
+
+        messages.addMessage("Performing spatial join...")
         join_out = "memory/parcel_join"
-        
+
         field_mappings = arcpy.FieldMappings()
-        
-        p_arn_map = arcpy.FieldMap()
-        p_arn_map.addInputField(parcel_lyr, p_arn_fld)
-        p_arn_map_out = p_arn_map.outputField
-        p_arn_map_out.name = "P_ARN_JOIN"
-        p_arn_map.outputField = p_arn_map_out
-        field_mappings.addFieldMap(p_arn_map)
-
-        p_addr_map = arcpy.FieldMap()
-        p_addr_map.addInputField(parcel_lyr, p_addr_fld)
-        p_addr_map_out = p_addr_map.outputField
-        p_addr_map_out.name = "P_ADDR_JOIN"
-        p_addr_map.outputField = p_addr_map_out
-        field_mappings.addFieldMap(p_addr_map)
-
-        c_arn_map = arcpy.FieldMap()
-        c_arn_map.addInputField(civic_lyr, c_arn_fld)
-        c_arn_map_out = c_arn_map.outputField
-        c_arn_map_out.name = "C_ARN_JOIN"
-        c_arn_map.outputField = c_arn_map_out
-        field_mappings.addFieldMap(c_arn_map)
-
-        c_addr_map = arcpy.FieldMap()
-        c_addr_map.addInputField(civic_lyr, c_addr_fld)
-        c_addr_map_out = c_addr_map.outputField
-        c_addr_map_out.name = "C_ADDR_JOIN"
-        c_addr_map.outputField = c_addr_map_out
-        field_mappings.addFieldMap(c_addr_map)
+        add_field_map(field_mappings, parcel_lyr, p_arn_fld, "P_ARN_J")
+        add_field_map(field_mappings, parcel_lyr, p_addr_fld, "P_ADR_J")
+        add_field_map(field_mappings, civic_lyr, c_arn_fld, "C_ARN_J")
+        add_field_map(field_mappings, civic_lyr, c_addr_fld, "C_ADR_J")
 
         arcpy.analysis.SpatialJoin(
-            parcel_lyr, 
-            civic_lyr, 
-            join_out, 
-            "JOIN_ONE_TO_MANY", 
+            parcel_lyr,
+            civic_lyr,
+            join_out,
+            "JOIN_ONE_TO_MANY",
             "KEEP_ALL",
             field_mappings
         )
 
         error_records = []
         messages.addMessage("Evaluating parcel and civic attributes...")
-        
-        fields = ["SHAPE@", "P_ARN_JOIN", "P_ADDR_JOIN", "C_ARN_JOIN", "C_ADDR_JOIN", "Join_Count"]
-        
+
+        fields = ["SHAPE@", "P_ARN_J", "P_ADR_J", "C_ARN_J", "C_ADR_J", "Join_Count"]
+
         with arcpy.da.SearchCursor(join_out, fields) as cursor:
             for row in cursor:
                 poly_geom = row[0]
-                
+
                 p_arn = str(row[1]).strip() if row[1] is not None else ""
                 p_addr_raw = row[2] if row[2] is not None else ""
                 p_addr = normalize_text(p_addr_raw)
-                
+
                 c_arn = str(row[3]).strip() if row[3] is not None else ""
                 c_addr_raw = row[4] if row[4] is not None else ""
                 c_addr = normalize_text(c_addr_raw)
-                
+
                 join_count = row[5] if row[5] is not None else 0
-                
-                is_specific_civic = is_civic_address(p_addr)
-                
+
+                parcel_is_specific = is_civic_address(p_addr)
+                civic_is_specific = is_civic_address(c_addr)
+
                 err_code = ""
                 err_desc = ""
                 match_typ = ""
                 spat_sts = "INSIDE"
-                
+
                 if join_count == 0:
-                    if is_specific_civic: 
+                    if parcel_is_specific:
                         err_code = "E01_MISS_PT"
                         err_desc = "Parcel has specific address but no civic point"
                         spat_sts = "MISSING"
                         match_typ = "FAIL"
+
                 else:
                     if not c_arn and not c_addr:
                         continue
-                    
+
                     if c_arn == p_arn and not c_addr:
                         err_code = "E09_GHOST"
                         err_desc = "Civic point exists with ARN but no address"
                         match_typ = "FAIL"
                         spat_sts = "GHOST"
+
                     elif c_arn != p_arn:
                         err_code = "E05_ARN_MIS"
                         err_desc = "ARN mismatch"
                         match_typ = "FAIL"
+
                     elif c_addr == p_addr:
-                        continue 
-                    elif not is_specific_civic:
                         continue
+
+                    elif civic_is_specific and not parcel_is_specific:
+                        err_code = "E10_PADDR"
+                        err_desc = "Civic has valid address but parcel address is missing or invalid"
+                        match_typ = "FAIL"
+
+                    elif not parcel_is_specific:
+                        continue
+
                     elif c_addr and p_addr and (c_addr in p_addr or p_addr in c_addr):
                         err_code = "E08_PARTIAL"
                         err_desc = "Partial address match"
                         match_typ = "PARTIAL"
+
                     else:
                         err_code = "E06_ADDR_MIS"
                         err_desc = "Complete address mismatch"
                         match_typ = "FAIL"
-                        
+
                 if err_code:
                     error_records.append({
                         "SHAPE@": poly_geom,
@@ -256,18 +256,26 @@ class IlluSync(object):
 
         messages.addMessage("Checking for orphaned civic points...")
         arcpy.management.MakeFeatureLayer(civic_lyr, "civic_mem")
-        arcpy.management.SelectLayerByLocation("civic_mem", "INTERSECT", parcel_lyr, "", "NEW_SELECTION", "INVERT")
-        
+        arcpy.management.SelectLayerByLocation(
+            "civic_mem",
+            "INTERSECT",
+            parcel_lyr,
+            "",
+            "NEW_SELECTION",
+            "INVERT"
+        )
+
         orphan_count = int(arcpy.management.GetCount("civic_mem")[0])
         orphan_buff = "memory/orphan_buff"
+
         if orphan_count > 0:
             messages.addMessage(f"Found {orphan_count} orphaned points. Buffering for polygon output...")
-            
+
             sr = arcpy.Describe(civic_lyr).spatialReference
             buff_dist = "0.00001" if sr.type == "Geographic" else "1"
-            
+
             arcpy.analysis.Buffer("civic_mem", orphan_buff, buff_dist)
-            
+
             miss_fields = ["SHAPE@", c_arn_fld, c_addr_fld]
             with arcpy.da.SearchCursor(orphan_buff, miss_fields) as cursor:
                 for row in cursor:
@@ -286,12 +294,22 @@ class IlluSync(object):
         messages.addMessage("Deduplicating records...")
         unique_records = []
         seen = set()
+
         for rec in error_records:
             geom_wkt = rec["SHAPE@"].WKT if rec["SHAPE@"] else ""
-            key = (rec["P_ARN"], rec["C_ARN"], rec["P_ADDR"], rec["C_ADDR"], rec["ERR_CODE"], geom_wkt)
+            key = (
+                rec["P_ARN"],
+                rec["C_ARN"],
+                rec["P_ADDR"],
+                rec["C_ADDR"],
+                rec["ERR_CODE"],
+                geom_wkt
+            )
+
             if key not in seen:
                 seen.add(key)
                 unique_records.append(rec)
+
         error_records = unique_records
 
         messages.addMessage(f"Found {len(error_records)} discrepancies. Building output schema...")
@@ -309,19 +327,26 @@ class IlluSync(object):
         ]
 
         temp_fc = "memory/illusync_errors"
-        
+
         arcpy.management.CreateFeatureclass(
-            out_path="memory", 
-            out_name="illusync_errors", 
-            geometry_type="POLYGON", 
-            spatial_reference=parcel_lyr
+            out_path="memory",
+            out_name="illusync_errors",
+            geometry_type="POLYGON",
+            spatial_reference=arcpy.Describe(parcel_lyr).spatialReference
         )
-        
+
         for field in out_fields:
-            arcpy.management.AddField(temp_fc, field[0], field[1], field_length=field[3], field_alias=field[2])
+            arcpy.management.AddField(
+                temp_fc,
+                field[0],
+                field[1],
+                field_length=field[3],
+                field_alias=field[2]
+            )
 
         messages.addMessage("Writing error records to disk...")
         insert_fields = ["SHAPE@"] + [f[0] for f in out_fields]
+
         with arcpy.da.InsertCursor(temp_fc, insert_fields) as cursor:
             for record in error_records:
                 row = [
@@ -339,12 +364,12 @@ class IlluSync(object):
                 cursor.insertRow(row)
 
         arcpy.management.CopyFeatures(temp_fc, out_fc)
-        
+
         arcpy.management.Delete(join_out)
         if orphan_count > 0:
             arcpy.management.Delete(orphan_buff)
         arcpy.management.Delete(temp_fc)
         arcpy.management.Delete("civic_mem")
-        
+
         messages.addMessage("IlluSync validation complete.")
         return
