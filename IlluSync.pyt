@@ -145,6 +145,14 @@ class IlluSync(object):
 
             return True
 
+        def truncate_text(text, max_len):
+            if not text:
+                return ""
+            text = str(text)
+            if len(text) <= max_len:
+                return text
+            return text[:max_len - 3] + "..."
+
         def add_field_map(field_mappings, source_layer, source_field, output_name):
             fm = arcpy.FieldMap()
             fm.addInputField(source_layer, source_field)
@@ -156,9 +164,13 @@ class IlluSync(object):
         messages.addMessage("Performing spatial join...")
         join_out = "memory/parcel_join"
 
+        civic_desc = arcpy.Describe(civic_lyr)
+        civic_oid_field = civic_desc.OIDFieldName
+
         field_mappings = arcpy.FieldMappings()
         add_field_map(field_mappings, parcel_lyr, p_arn_fld, "P_ARN_J")
         add_field_map(field_mappings, parcel_lyr, p_addr_fld, "P_ADR_J")
+        add_field_map(field_mappings, civic_lyr, civic_oid_field, "C_OID_J")
         add_field_map(field_mappings, civic_lyr, c_arn_fld, "C_ARN_J")
         add_field_map(field_mappings, civic_lyr, c_addr_fld, "C_ADR_J")
 
@@ -171,88 +183,173 @@ class IlluSync(object):
             field_mappings
         )
 
-        error_records = []
+        join_fields = [f.name for f in arcpy.ListFields(join_out)]
+
+        if "TARGET_FID" in join_fields:
+            target_id_field = "TARGET_FID"
+        elif "P_ARN_J" in join_fields:
+            target_id_field = "P_ARN_J"
+        else:
+            target_id_field = "OID"
+
+        point_count = {}
+        point_summary = {}
+
+        messages.addMessage("Building civic point count per parcel...")
+
+        if "C_OID_J" in join_fields:
+            summary_fields = [target_id_field, "C_OID_J", "C_ARN_J", "C_ADR_J"]
+
+            with arcpy.da.SearchCursor(join_out, summary_fields) as cursor:
+                for row in cursor:
+                    target_id = row[0]
+                    civic_oid = row[1]
+
+                    if civic_oid is not None:
+                        point_count[target_id] = point_count.get(target_id, 0) + 1
+
+                        c_arn_summary = str(row[2]).strip() if row[2] is not None else ""
+                        c_addr_summary = str(row[3]).strip() if row[3] is not None else ""
+
+                        if c_arn_summary or c_addr_summary:
+                            entry = f"ARN:{c_arn_summary} ADD:{c_addr_summary}"
+                            point_summary.setdefault(target_id, []).append(entry)
+
+        else:
+            summary_fields = [target_id_field, "C_ARN_J", "C_ADR_J"]
+
+            with arcpy.da.SearchCursor(join_out, summary_fields) as cursor:
+                for row in cursor:
+                    target_id = row[0]
+                    c_arn_summary = str(row[1]).strip() if row[1] is not None else ""
+                    c_addr_summary = str(row[2]).strip() if row[2] is not None else ""
+
+                    if c_arn_summary or c_addr_summary:
+                        point_count[target_id] = point_count.get(target_id, 0) + 1
+                        entry = f"ARN:{c_arn_summary} ADD:{c_addr_summary}"
+                        point_summary.setdefault(target_id, []).append(entry)
+
+        parcel_errors = {}
+
+        def get_parcel_record(target_id, geom, p_arn, p_addr_raw, parcel_point_count):
+            if target_id not in parcel_errors:
+                parcel_errors[target_id] = {
+                    "SHAPE@": geom,
+                    "P_ARN": p_arn,
+                    "P_ADDR": p_addr_raw,
+                    "PT_COUNT": parcel_point_count,
+                    "C_LIST": truncate_text("; ".join(point_summary.get(target_id, [])), 250),
+                    "NOTE": "MULTI POINT" if parcel_point_count > 1 else "",
+                    "POINT_ERRORS": [],
+                    "SEEN_ERRORS": set()
+                }
+
+            return parcel_errors[target_id]
+
         messages.addMessage("Evaluating parcel and civic attributes...")
 
-        fields = ["SHAPE@", "P_ARN_J", "P_ADR_J", "C_ARN_J", "C_ADR_J", "Join_Count"]
+        fields = [
+            target_id_field,
+            "SHAPE@",
+            "P_ARN_J",
+            "P_ADR_J",
+            "C_ARN_J",
+            "C_ADR_J"
+        ]
 
         with arcpy.da.SearchCursor(join_out, fields) as cursor:
             for row in cursor:
-                poly_geom = row[0]
+                target_id = row[0]
+                poly_geom = row[1]
 
-                p_arn = str(row[1]).strip() if row[1] is not None else ""
-                p_addr_raw = row[2] if row[2] is not None else ""
+                p_arn = str(row[2]).strip() if row[2] is not None else ""
+                p_addr_raw = row[3] if row[3] is not None else ""
                 p_addr = normalize_text(p_addr_raw)
 
-                c_arn = str(row[3]).strip() if row[3] is not None else ""
-                c_addr_raw = row[4] if row[4] is not None else ""
+                c_arn = str(row[4]).strip() if row[4] is not None else ""
+                c_addr_raw = row[5] if row[5] is not None else ""
                 c_addr = normalize_text(c_addr_raw)
 
-                join_count = row[5] if row[5] is not None else 0
+                parcel_point_count = point_count.get(target_id, 0)
+
+                rec = get_parcel_record(
+                    target_id,
+                    poly_geom,
+                    p_arn,
+                    p_addr_raw,
+                    parcel_point_count
+                )
 
                 parcel_is_specific = is_civic_address(p_addr)
                 civic_is_specific = is_civic_address(c_addr)
+
+                if parcel_point_count == 0:
+                    if parcel_is_specific:
+                        err_key = ("", "", "E01_MISS_PT")
+                        if err_key not in rec["SEEN_ERRORS"]:
+                            rec["SEEN_ERRORS"].add(err_key)
+                            rec["POINT_ERRORS"].append({
+                                "C_ARN": "",
+                                "C_ADDR": "",
+                                "SPAT_STS": "MISSING",
+                                "MATCH_TYP": "FAIL",
+                                "ERR_CODE": "E01_MISS_PT",
+                                "ERR_DESC": "Parcel has specific address but no civic point"
+                            })
+                    continue
+
+                if not c_arn and not c_addr:
+                    continue
 
                 err_code = ""
                 err_desc = ""
                 match_typ = ""
                 spat_sts = "INSIDE"
 
-                if join_count == 0:
-                    if parcel_is_specific:
-                        err_code = "E01_MISS_PT"
-                        err_desc = "Parcel has specific address but no civic point"
-                        spat_sts = "MISSING"
-                        match_typ = "FAIL"
+                if c_arn == p_arn and not c_addr:
+                    err_code = "E09_GHOST"
+                    err_desc = "Civic point exists with ARN but no address"
+                    match_typ = "FAIL"
+                    spat_sts = "GHOST"
+
+                elif c_arn != p_arn:
+                    err_code = "E05_ARN_MIS"
+                    err_desc = "ARN mismatch"
+                    match_typ = "FAIL"
+
+                elif c_addr == p_addr:
+                    continue
+
+                elif civic_is_specific and not parcel_is_specific:
+                    err_code = "E10_PADDR"
+                    err_desc = "Civic has valid address but parcel address is missing or invalid"
+                    match_typ = "FAIL"
+
+                elif not parcel_is_specific:
+                    continue
+
+                elif c_addr and p_addr and (c_addr in p_addr or p_addr in c_addr):
+                    err_code = "E08_PARTIAL"
+                    err_desc = "Partial address match"
+                    match_typ = "PARTIAL"
 
                 else:
-                    if not c_arn and not c_addr:
-                        continue
-
-                    if c_arn == p_arn and not c_addr:
-                        err_code = "E09_GHOST"
-                        err_desc = "Civic point exists with ARN but no address"
-                        match_typ = "FAIL"
-                        spat_sts = "GHOST"
-
-                    elif c_arn != p_arn:
-                        err_code = "E05_ARN_MIS"
-                        err_desc = "ARN mismatch"
-                        match_typ = "FAIL"
-
-                    elif c_addr == p_addr:
-                        continue
-
-                    elif civic_is_specific and not parcel_is_specific:
-                        err_code = "E10_PADDR"
-                        err_desc = "Civic has valid address but parcel address is missing or invalid"
-                        match_typ = "FAIL"
-
-                    elif not parcel_is_specific:
-                        continue
-
-                    elif c_addr and p_addr and (c_addr in p_addr or p_addr in c_addr):
-                        err_code = "E08_PARTIAL"
-                        err_desc = "Partial address match"
-                        match_typ = "PARTIAL"
-
-                    else:
-                        err_code = "E06_ADDR_MIS"
-                        err_desc = "Complete address mismatch"
-                        match_typ = "FAIL"
+                    err_code = "E06_ADDR_MIS"
+                    err_desc = "Complete address mismatch"
+                    match_typ = "FAIL"
 
                 if err_code:
-                    error_records.append({
-                        "SHAPE@": poly_geom,
-                        "P_ARN": p_arn,
-                        "P_ADDR": p_addr_raw,
-                        "C_ARN": c_arn,
-                        "C_ADDR": c_addr_raw,
-                        "SPAT_STS": spat_sts,
-                        "MATCH_TYP": match_typ,
-                        "ERR_CODE": err_code,
-                        "ERR_DESC": err_desc
-                    })
+                    err_key = (c_arn, c_addr, err_code)
+                    if err_key not in rec["SEEN_ERRORS"]:
+                        rec["SEEN_ERRORS"].add(err_key)
+                        rec["POINT_ERRORS"].append({
+                            "C_ARN": c_arn,
+                            "C_ADDR": c_addr_raw,
+                            "SPAT_STS": spat_sts,
+                            "MATCH_TYP": match_typ,
+                            "ERR_CODE": err_code,
+                            "ERR_DESC": err_desc
+                        })
 
         messages.addMessage("Checking for orphaned civic points...")
         arcpy.management.MakeFeatureLayer(civic_lyr, "civic_mem")
@@ -279,19 +376,103 @@ class IlluSync(object):
             miss_fields = ["SHAPE@", c_arn_fld, c_addr_fld]
             with arcpy.da.SearchCursor(orphan_buff, miss_fields) as cursor:
                 for row in cursor:
-                    error_records.append({
+                    c_arn_orphan = str(row[1]).strip() if row[1] is not None else ""
+                    c_addr_orphan = row[2] if row[2] is not None else ""
+
+                    orphan_list = truncate_text(
+                        f"ARN:{c_arn_orphan} ADD:{str(c_addr_orphan).strip()}",
+                        250
+                    )
+
+                    orphan_err_list = truncate_text(
+                        f"{c_arn_orphan}|{str(c_addr_orphan).strip()}|E02_ORPHAN",
+                        250
+                    )
+
+                    parcel_errors[f"ORPHAN_{c_arn_orphan}_{str(c_addr_orphan).strip()}_{row[0].WKT}"] = {
                         "SHAPE@": row[0],
                         "P_ARN": "",
                         "P_ADDR": "",
-                        "C_ARN": str(row[1]).strip() if row[1] is not None else "",
-                        "C_ADDR": row[2] if row[2] is not None else "",
-                        "SPAT_STS": "OUTSIDE",
-                        "MATCH_TYP": "FAIL",
-                        "ERR_CODE": "E02_ORPHAN",
-                        "ERR_DESC": "Point outside any parcel"
-                    })
+                        "PT_COUNT": 1,
+                        "C_LIST": orphan_list,
+                        "NOTE": "ORPHAN",
+                        "POINT_ERRORS": [{
+                            "C_ARN": c_arn_orphan,
+                            "C_ADDR": c_addr_orphan,
+                            "SPAT_STS": "OUTSIDE",
+                            "MATCH_TYP": "FAIL",
+                            "ERR_CODE": "E02_ORPHAN",
+                            "ERR_DESC": "Point outside any parcel"
+                        }],
+                        "ERR_LIST_OVERRIDE": orphan_err_list
+                    }
 
-        messages.addMessage("Deduplicating records...")
+        messages.addMessage("Collapsing records to one parcel per issue group...")
+
+        error_records = []
+
+        for target_id, rec in parcel_errors.items():
+            errs = rec["POINT_ERRORS"]
+
+            if not errs:
+                continue
+
+            codes = sorted(list({e["ERR_CODE"] for e in errs}))
+
+            if len(codes) == 1:
+                err_code = codes[0]
+                err_desc = next(e["ERR_DESC"] for e in errs if e["ERR_CODE"] == err_code)
+            else:
+                err_code = "E00_MULTI"
+                err_desc = "Multiple error types found"
+
+            spat_values = sorted(list({e["SPAT_STS"] for e in errs if e.get("SPAT_STS")}))
+            if len(spat_values) == 1:
+                spat_sts = spat_values[0]
+            elif len(spat_values) > 1:
+                spat_sts = "MIXED"
+            else:
+                spat_sts = ""
+
+            match_values = sorted(list({e["MATCH_TYP"] for e in errs if e.get("MATCH_TYP")}))
+            if len(match_values) == 1:
+                match_typ = match_values[0]
+            elif len(match_values) > 1:
+                match_typ = "MIXED"
+            else:
+                match_typ = ""
+
+            if "ERR_LIST_OVERRIDE" in rec:
+                err_list = rec["ERR_LIST_OVERRIDE"]
+            else:
+                err_list_items = []
+                for e in errs:
+                    c_id = e["C_ARN"] if e["C_ARN"] else "NOARN"
+                    c_add = str(e["C_ADDR"]).strip() if e["C_ADDR"] else "NOADDR"
+                    err_list_items.append(f"{c_id}|{c_add}|{e['ERR_CODE']}")
+
+                err_list = truncate_text("; ".join(err_list_items), 250)
+
+            first_err = errs[0]
+
+            error_records.append({
+                "SHAPE@": rec["SHAPE@"],
+                "P_ARN": rec["P_ARN"],
+                "P_ADDR": rec["P_ADDR"],
+                "C_ARN": first_err.get("C_ARN", ""),
+                "C_ADDR": first_err.get("C_ADDR", ""),
+                "SPAT_STS": spat_sts,
+                "MATCH_TYP": match_typ,
+                "ERR_CODE": err_code,
+                "ERR_DESC": err_desc,
+                "ERR_LIST": err_list,
+                "PT_COUNT": str(rec["PT_COUNT"]),
+                "C_LIST": rec["C_LIST"],
+                "NOTE": rec["NOTE"],
+                "REVIEW_FLG": "Y"
+            })
+
+        messages.addMessage("Deduplicating final records...")
         unique_records = []
         seen = set()
 
@@ -299,10 +480,8 @@ class IlluSync(object):
             geom_wkt = rec["SHAPE@"].WKT if rec["SHAPE@"] else ""
             key = (
                 rec["P_ARN"],
-                rec["C_ARN"],
-                rec["P_ADDR"],
-                rec["C_ADDR"],
                 rec["ERR_CODE"],
+                rec["ERR_LIST"],
                 geom_wkt
             )
 
@@ -312,7 +491,7 @@ class IlluSync(object):
 
         error_records = unique_records
 
-        messages.addMessage(f"Found {len(error_records)} discrepancies. Building output schema...")
+        messages.addMessage(f"Found {len(error_records)} collapsed discrepancy records. Building output schema...")
 
         out_fields = [
             ("P_ARN", "TEXT", "Parcel ARN", 50),
@@ -323,6 +502,10 @@ class IlluSync(object):
             ("MATCH_TYP", "TEXT", "Match Type", 20),
             ("ERR_CODE", "TEXT", "Error Code", 20),
             ("ERR_DESC", "TEXT", "Error Description", 100),
+            ("ERR_LIST", "TEXT", "Error List", 250),
+            ("PT_COUNT", "TEXT", "Point Count", 10),
+            ("C_LIST", "TEXT", "Civic List", 250),
+            ("NOTE", "TEXT", "Notes", 30),
             ("REVIEW_FLG", "TEXT", "Review Flag", 10)
         ]
 
@@ -359,7 +542,11 @@ class IlluSync(object):
                     record.get("MATCH_TYP", ""),
                     record.get("ERR_CODE", ""),
                     record.get("ERR_DESC", ""),
-                    "Y"
+                    record.get("ERR_LIST", ""),
+                    record.get("PT_COUNT", ""),
+                    record.get("C_LIST", ""),
+                    record.get("NOTE", ""),
+                    record.get("REVIEW_FLG", "Y")
                 ]
                 cursor.insertRow(row)
 
