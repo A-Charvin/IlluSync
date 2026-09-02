@@ -14,6 +14,7 @@ IlluSync spatially compares a parcel polygon layer against a civic address point
 | `E06_ADDR_MIS` | Parcel and civic addresses fully disagree |
 | `E08_PARTIAL` | Parcel and civic addresses partially overlap (e.g. truncated text) |
 | `E09_GHOST` | Civic point has an ARN but no address |
+| `E10_PADDR` | Civic Address exists, Parcel have partial or no address |
 
 Addresses are normalized (suffix expansion, punctuation, whitespace) before comparison, and rural/rangeline-style addressing (concession, sideroad, line, etc.) is distinguished from standard civic numbering to avoid false positives.
 
