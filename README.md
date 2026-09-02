@@ -8,20 +8,21 @@ IlluSync spatially compares a parcel polygon layer against a civic address point
 
 | Error Code | Description |
 |---|---|
-| `E01_MISS_PT` | Parcel has a specific address but no civic point inside it |
-| `E02_ORPHAN` | Civic point falls outside any parcel |
-| `E05_ARN_MIS` | Parcel and civic ARN (Assessment Roll Number) don't match |
+| `E00_MULTI` | Multiple error types found within the same parcel (details stored in ERR_LIST) |
+| `E01_MISS_PT` | Parcel has a specific civic address but no civic point inside it |
+| `E02_ORPHAN` | Civic point falls outside any parcel boundary |
+| `E05_ARN_MIS` | Parcel and civic ARN (Assessment Roll Number) do not match |
 | `E06_ADDR_MIS` | Parcel and civic addresses fully disagree |
-| `E08_PARTIAL` | Parcel and civic addresses partially overlap (e.g. truncated text) |
-| `E09_GHOST` | Civic point has an ARN but no address |
-| `E10_PADDR` | Civic Address exists, Parcel have partial or no address |
+| `E08_PARTIAL` | Parcel and civic addresses partially overlap (e.g. truncated text or unit numbers) |
+| `E09_GHOST` | Civic point has a matching ARN but lacks an address |
+| `E10_PADDR` | Civic point has a valid address, but the parcel address is missing or invalid |
 
 Addresses are normalized (suffix expansion, punctuation, whitespace) before comparison, and rural/rangeline-style addressing (concession, sideroad, line, etc.) is distinguished from standard civic numbering to avoid false positives.
 
 ## Requirements
 
-- ArcGIS Pro 3.x (ArcPy)
-- No external Python libraries - runs in ArcGIS Pro's native Python environment
+* ArcGIS Pro 3.x (ArcPy)
+* No external Python libraries required
 
 ## Inputs
 
@@ -29,30 +30,34 @@ Addresses are normalized (suffix expansion, punctuation, whitespace) before comp
 - **Civic Point Layer** (point) + ARN field + Address field
 - **Output Exception Feature Class** (polygon)
 
-Field names are chosen at runtime - there's no fixed schema requirement, so it can run against any municipality's parcel and civic layers.
+Field names are selected at runtime through dynamic dropdowns. There are no hardcoded schema requirements.
 
 ## Output
 
-A single polygon feature class containing only the flagged records, with:
+A single polygon feature class containing only the flagged records. When a parcel contains multiple civic points, the tool collapses them into one polygon row. The output schema includes:
 
-- Parcel ARN / Address
-- Civic ARN / Address
-- Spatial status (`INSIDE`, `OUTSIDE`, `MISSING`, `GHOST`)
-- Match type (`FAIL`, `PARTIAL`)
-- Error code and description
-- Review flag (for QA sign-off tracking)
+* **Identifiers:** Parcel ARN, Parcel Address, Civic ARN, Civic Address (from the first evaluated point).
+* **Status Fields:** Spatial status (`INSIDE`, `OUTSIDE`, `MISSING`, `GHOST`), Match type (`FAIL`, `PARTIAL`, `MIXED`), Error code, Error description.
+* **Aggregation Fields:** 
+  * `PT_COUNT`: Total number of civic points found inside the parcel.
+  * `C_LIST`: A text list of all civic ARNs and addresses tied to the parcel.
+  * `ERR_LIST`: A breakdown of specific errors tied to individual points on the parcel.
+  * `NOTE`: Context tags like `MULTI POINT` or `ORPHAN`.
+* **Review flag:** For QA sign-off tracking.
 
 ## Design principles
 
-- **Validation-only** - no auto-correction, no silent overwrites. The tool flags; a human decides.
-- **Schema-agnostic** - field mapping happens at runtime, not hardcoded.
-- **No external dependencies** - pure ArcPy, runs anywhere ArcGIS Pro is installed.
+* **Validation-only:** No auto-correction and no silent overwrites. The tool flags records for human review.
+* **Aggregated output:** One output polygon per parcel prevents map clutter and duplicate geometry errors.
+* **Schema-agnostic:** Field mapping happens at runtime using explicit field maps to prevent ghost fields.
+* **Safe memory management:** Uses the `memory` workspace and strictly deletes only its own temporary datasets to prevent conflicts in ModelBuilder.
+* **No external dependencies:** Pure ArcPy, runs anywhere ArcGIS Pro is installed.
 
 ## Known limitations
 
-- Address normalization rules are tuned for English/Ontario-style addressing conventions.
-- ARN fields with numeric types (Double/Long) may require additional normalization depending on source formatting.
-- Long address strings beyond 150 characters will need field-length adjustment before running.
+* Address normalization rules are tuned for English/Ontario-style addressing conventions.
+* ARN fields with numeric types (Double/Long) require explicit None-checks during processing to protect valid zero values.
+* Long address strings beyond 250 characters are truncated with ellipses to respect geodatabase field limits.
 
 ## Part of the NG911 QA tool series
 
