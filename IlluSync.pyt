@@ -121,29 +121,30 @@ class IlluSync(object):
         def is_civic_address(text):
             if not text:
                 return False
-
             words = text.split()
             if not words:
                 return False
-
             first_word = words[0]
-
-            if not first_word.isdigit():
+            
+            if re.match(r'^\d+(st|nd|rd|th)$', first_word):
                 return False
-
-            if len(first_word) >= 3:
+                
+            if re.match(r'^\d', first_word):
+                if first_word.isdigit():
+                    if len(first_word) >= 3:
+                        return True
+                    if len(words) > 1:
+                        second_word = words[1]
+                        rural_indicators = {
+                            'line', 'highway', 'hwy', 'con', 'concession',
+                            'route', 'rte', 'sideroad', 'point', 'road', 'street'
+                        }
+                        if second_word in rural_indicators:
+                            return False
+                    return True
                 return True
-
-            if len(words) > 1:
-                second_word = words[1]
-                rural_indicators = {
-                    'line', 'highway', 'hwy', 'con', 'concession',
-                    'route', 'rte', 'sideroad'
-                }
-                if second_word in rural_indicators:
-                    return False
-
-            return True
+                
+            return False
 
         def truncate_text(text, max_len):
             if not text:
@@ -229,6 +230,26 @@ class IlluSync(object):
                         entry = f"ARN:{c_arn_summary} ADD:{c_addr_summary}"
                         point_summary.setdefault(target_id, []).append(entry)
 
+        # Pre-pass: identify ARN+address combos that already have a civic point
+        # This prevents false positives on split parcels sharing the same ARN/address
+        messages.addMessage("Identifying shared ARN/address groups...")
+        resolved_combos = set()
+        seen_targets = set()
+        resolve_fields = [target_id_field, "P_ARN_J", "P_ADR_J"]
+
+        with arcpy.da.SearchCursor(join_out, resolve_fields) as cursor:
+            for row in cursor:
+                target_id = row[0]
+                if target_id in seen_targets:
+                    continue
+                seen_targets.add(target_id)
+
+                if point_count.get(target_id, 0) > 0:
+                    p_arn_val = str(row[1]).strip() if row[1] is not None else ""
+                    p_addr_val = normalize_text(row[2]) if row[2] is not None else ""
+                    if p_arn_val and p_addr_val:
+                        resolved_combos.add((p_arn_val, p_addr_val))
+
         parcel_errors = {}
 
         def get_parcel_record(target_id, geom, p_arn, p_addr_raw, parcel_point_count):
@@ -285,20 +306,34 @@ class IlluSync(object):
 
                 if parcel_point_count == 0:
                     if parcel_is_specific:
-                        err_key = ("", "", "E01_MISS_PT")
+                        # Skip if another parcel with same ARN+address already has a point
+                        if (p_arn, p_addr) not in resolved_combos:
+                            err_key = ("", "", "E01_MISS_PT")
+                            if err_key not in rec["SEEN_ERRORS"]:
+                                rec["SEEN_ERRORS"].add(err_key)
+                                rec["POINT_ERRORS"].append({
+                                    "C_ARN": "",
+                                    "C_ADDR": "",
+                                    "SPAT_STS": "MISSING",
+                                    "MATCH_TYP": "FAIL",
+                                    "ERR_CODE": "E01_MISS_PT",
+                                    "ERR_DESC": "Parcel has specific address but no civic point"
+                                })
+                    continue
+
+                if not c_arn and not c_addr:
+                    if parcel_is_specific:
+                        err_key = ("", "", "E11_BLNK_PT")
                         if err_key not in rec["SEEN_ERRORS"]:
                             rec["SEEN_ERRORS"].add(err_key)
                             rec["POINT_ERRORS"].append({
                                 "C_ARN": "",
                                 "C_ADDR": "",
-                                "SPAT_STS": "MISSING",
+                                "SPAT_STS": "BLANK",
                                 "MATCH_TYP": "FAIL",
-                                "ERR_CODE": "E01_MISS_PT",
-                                "ERR_DESC": "Parcel has specific address but no civic point"
+                                "ERR_CODE": "E11_BLNK_PT",
+                                "ERR_DESC": "Civic point is blank but parcel has an address"
                             })
-                    continue
-
-                if not c_arn and not c_addr:
                     continue
 
                 err_code = ""
