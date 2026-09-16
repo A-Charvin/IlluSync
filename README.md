@@ -4,7 +4,9 @@ An ArcGIS Pro Python toolbox that validates MPAC parcel data against civic addre
 
 ## What it does
 
-IlluSync spatially compares a parcel polygon layer against a civic address point layer and reports discrepancies as a single exception feature class. It checks for:
+IlluSync spatially compares a parcel polygon layer against a civic address point layer and reports discrepancies as a single exception feature class. It aggregates multiple points on a single parcel into one polygon record to prevent duplicate geometries.
+
+It checks for the following scenarios:
 
 | Error Code | Description |
 |---|---|
@@ -16,8 +18,13 @@ IlluSync spatially compares a parcel polygon layer against a civic address point
 | `E08_PARTIAL` | Parcel and civic addresses partially overlap (e.g. truncated text or unit numbers) |
 | `E09_GHOST` | Civic point has a matching ARN but lacks an address |
 | `E10_PADDR` | Civic point has a valid address, but the parcel address is missing or invalid |
+| `E11_BLNK_PT` | Civic point exists inside the parcel but has no ARN and no address |
 
-Addresses are normalized (suffix expansion, punctuation, whitespace) before comparison, and rural/rangeline-style addressing (concession, sideroad, line, etc.) is distinguished from standard civic numbering to avoid false positives.
+Addresses are normalized before comparison. The tool strips punctuation, standardizes case, expands common suffixes, and removes "WAO" (Water Access Only) tags.
+
+Smart rural address filtering is applied to avoid false positives. Ordinal road names like "10th Line Road" and short rural route numbers like "8 Point Road" are recognized as road names, while true house numbers like "567 North Shore Road" or "123A Main Street" are treated as civic addresses.
+
+Split parcels sharing the same ARN and address are handled as a group. If one parcel in the group has a civic point, the sibling parcels without points are not falsely flagged as missing.
 
 ## Requirements
 
@@ -26,9 +33,9 @@ Addresses are normalized (suffix expansion, punctuation, whitespace) before comp
 
 ## Inputs
 
-- **Parcel Layer** (polygon) + ARN field + Address field
-- **Civic Point Layer** (point) + ARN field + Address field
-- **Output Exception Feature Class** (polygon)
+* **Parcel Layer** (polygon) + ARN field + Address field
+* **Civic Point Layer** (point) + ARN field + Address field
+* **Output Exception Feature Class** (polygon)
 
 Field names are selected at runtime through dynamic dropdowns. There are no hardcoded schema requirements.
 
@@ -37,8 +44,8 @@ Field names are selected at runtime through dynamic dropdowns. There are no hard
 A single polygon feature class containing only the flagged records. When a parcel contains multiple civic points, the tool collapses them into one polygon row. The output schema includes:
 
 * **Identifiers:** Parcel ARN, Parcel Address, Civic ARN, Civic Address (from the first evaluated point).
-* **Status Fields:** Spatial status (`INSIDE`, `OUTSIDE`, `MISSING`, `GHOST`), Match type (`FAIL`, `PARTIAL`, `MIXED`), Error code, Error description.
-* **Aggregation Fields:** 
+* **Status Fields:** Spatial status (`INSIDE`, `OUTSIDE`, `MISSING`, `GHOST`, `BLANK`, `MIXED`), Match type (`FAIL`, `PARTIAL`, `MIXED`), Error code, Error description.
+* **Aggregation Fields:**
   * `PT_COUNT`: Total number of civic points found inside the parcel.
   * `C_LIST`: A text list of all civic ARNs and addresses tied to the parcel.
   * `ERR_LIST`: A breakdown of specific errors tied to individual points on the parcel.
@@ -49,6 +56,7 @@ A single polygon feature class containing only the flagged records. When a parce
 
 * **Validation-only:** No auto-correction and no silent overwrites. The tool flags records for human review.
 * **Aggregated output:** One output polygon per parcel prevents map clutter and duplicate geometry errors.
+* **Split parcel aware:** Parcels sharing the same ARN and address are resolved as a group to prevent false missing point flags.
 * **Schema-agnostic:** Field mapping happens at runtime using explicit field maps to prevent ghost fields.
 * **Safe memory management:** Uses the `memory` workspace and strictly deletes only its own temporary datasets to prevent conflicts in ModelBuilder.
 * **No external dependencies:** Pure ArcPy, runs anywhere ArcGIS Pro is installed.
@@ -58,9 +66,10 @@ A single polygon feature class containing only the flagged records. When a parce
 * Address normalization rules are tuned for English/Ontario-style addressing conventions.
 * ARN fields with numeric types (Double/Long) require explicit None-checks during processing to protect valid zero values.
 * Long address strings beyond 250 characters are truncated with ellipses to respect geodatabase field limits.
+* Split parcel resolution requires both ARN and address to match. Parcels with the same ARN but different addresses are treated independently.
 
 ## Part of the NG911 QA tool series
 
-- [RoadRanger](https://github.com/A-Charvin/RoadRanger-QA-911) - road segment address range continuity validation
-- [FishboneQA](https://github.com/A-Charvin/Fishbone-QA-911) - civic address point-to-road centerline matching
-- **IlluSync** - parcel/civic address cross-validation
+* [RoadRanger](https://github.com/A-Charvin/RoadRanger-QA-911) - road segment address range continuity validation
+* [FishboneQA](https://github.com/A-Charvin/Fishbone-QA-911) - civic address point-to-road centerline matching
+* **IlluSync** - parcel/civic address cross-validation
